@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 
-import os
-import cStringIO
+import os, sys
+if sys.version_info < (3,):
+    from cStringIO import StringIO
+else:
+    from io import StringIO
+
 
 class TaxNode(object):
     def __init__(self, name):
@@ -83,20 +87,16 @@ class Taxonomy(object):
 class Item(object):
 
     itemtypes = {
-        0: 'Any',
-        1: 'LParen', 
-        2: 'Label',
-        3: 'RParen',
-        4: 'Comma',
-        5: 'Single quote (open)',
-        6: 'Single quote (close)',
-        7: 'Double quote (open)',
-        8: 'Double quote (close)',
-        9: 'Comment',
-        10: 'NHX key',
-        11: 'NHX value',
-        12: 'Branch length',
-        13: 'Support value',
+        0: 'End of file',
+        1: 'Tree',
+        2: 'LParen', 
+        3: 'Label',
+        4: 'RParen',
+        5: 'Comma',
+        6: 'Colon',
+        7: 'Branch length',
+        8: 'Support value',
+        9: 'End',
     }
 
     def __init__(self, typ, val):
@@ -113,40 +113,41 @@ class LexerStop(Exception):
 class Lexer(object):
 
     # constants representing item types
-    ANY     = 0
-    LPAREN  = 1
-    LABEL   = 2
-    RPAREN  = 3
-    COMMA   = 4
-    LSQUOTE = 5
-    RSQUOTE = 6
-    LDQUOTE = 7
-    RDQUOTE = 8
-    COMMENT = 9
-    NHXKEY  = 10
-    NHKVAL  = 11
-    LENGTH  = 12
-    SUPPORT = 13
+    EOF     = 0
+    TREE    = 1
+    LPAREN  = 2
+    LABEL   = 3
+    RPAREN  = 4
+    COMMA   = 5
+    COLON   = 6
+    LENGTH  = 7
+    SUPPORT = 8
+    END     = 9
 
     def __init__(self, stream):
         if isinstance(stream, str):
-            stream = cStringIO.StringIO(stream)
+            stream = StringIO(stream)
         self.stream = stream
         self.token = None
         self.token_buffer = bytearray()
-        self.state = self.find_tree
+        self.state = self.lex_tree
+        self.pos = 0
 
     def _next(self):
         char = self.stream.read(1)
         if char == '':
-            self.token = None
-            self.token_buffer = []
-            l.stream.close()
             raise LexerStop
+        self.pos += 1
         return char
 
     def _backup(self):
         self.stream.seek(-1, 1)
+        self.pos -= 1
+
+    def _tidyup(self):
+        self.token = None
+        self.token_buffer
+        self.stream.close()
 
     def _peek(self):
         char = self._next()
@@ -155,73 +156,151 @@ class Lexer(object):
 
     def _emit(self, item):
         self.token = item
+        self._empty_buffer()
+
+    def _empty_buffer(self):
         self.token_buffer = self.token_buffer[0:0]
+
+    def _stop(self):
+        raise LexerStop
 
     def next(self):
         try:
-            self.state = self.state()
-            if self.token:
-                return self.token
+            while not self.token:
+                self.state = self.state()
+            token, self.token = self.token, None
+            return token
         except LexerStop:
-            return None
+            self._emit(Item(self.EOF, 1))
+            self._tidyup()
 
-    def basic_state_function(self):
-        char = self._next()
-        self.token_buffer.append(char)
-        item = Item(ANY, str(self.token_buffer))
-        self._emit(item)
-        return self.basic_state_function
-
-    def find_tree(self):
+    def lex_tree(self):
         while not self.stream.closed:
             char = self._next()
             if char == '(':
-                self._emit(Item(LPAREN, char))
+                self._emit(Item(self.TREE, char))
                 return self.lex_node
-        print 'Could not find a tree'
+            if char == '':
+                break
+        self._emit(Item(self.EOF, None))
         return None
 
-    def lex_node(self):
-        startpos = self.stream.tell()
+    def lex_before_node(self):
+        """
+        Enter: after seeing LPAREN
+        Expect: LABEL (can be blank) or LPAREN
+        Also accept: RPAREN (empty node)
+        """
         char = self._next()
         if char == '(':
-            self._emit(Item(LPAREN, char))
+            self._emit(Item(self.LPAREN, char))
             return self.lex_node
-        elif char == "'":
-            self._emit(Item(LSQUOTE, char))
-            return self.lex_single_quoted_label
-        elif char == '"':
-            self._emit(Item(LDQUOTE, char))
-            return self.lex_double_quoted_label
-        elif char.isalpha():
+
+        elif char == ')':
+            self._emit(Item(self.RPAREN, char))
+            return self.lex_label
+
+        elif char.isspace(): # ignore
+            return self.lex_node
+
+        # elif char == ',':  # bug - ignores missing labels eg (,,(,));
+        #     return self.lex_node
+
+        elif char == ';':
+            self._emit(Item(self.END, char))
+            return self.lex_tree
+
+        else:
             self._backup()
             return self.lex_label
-        elif char == ',':
-            self._emit(Item(COMMA, char))
-            return self.lex_node
-        elif char == ')':
-            self._emit(Item(RPAREN, char))
-            return self.lex_length_or_label
-        else:
-            endpos = self.stream.tell()
-            self.stream.seek(startpos)
-            guilty = self.stream.read(endpos - startpos)
-            raise Exception('Error closing node\n{0}'.format(guilty))
 
-    def lex_single_quoted_label(self):
+    def lex_after_node(self):
         pass
 
-    def lex_double_quoted_label(self):
-        pass
 
     def lex_label(self):
-        pass
+        """
+        Enter: after seeing LPAREN, RPAREN or COMMA
+        Expect: LENGTH
+        """
+        char = self._next()
+        if char in ('"', "'"):
+            self._match_quoted_label(char)
+        else:
+            self._backup()
+            de_spacer = {' ': ''}
+            self._match_run(str.isalnum, accepted_chars='-_|', 
+                denied_chars=':,;', replacements=de_spacer)
+        self._emit(Item(self.LABEL, str(self.token_buffer)))
+        if self._peek() == ',':
+            self._next()
 
-    def lex_length_or_label(self):
-        pass
+        return self.lex_length
 
 
+    def lex_length(self):
+        char = self._next()
+        if char == ':':
+            self._match_number()
+            if len(self.token_buffer) == 0:
+                num = 0.0
+            else: 
+                num = float(self.token_buffer)
+        else:
+            self._backup()
+            num = 0.0
+        self._emit(Item(self.LENGTH, num))
+        return self.lex_node
 
+    def _match_quoted_label(self, terminator):
+        while not self.stream.closed:
+            char = self._next()
+            if char == terminator:
+                return 
+            self.token_buffer.append(char)
+        raise Exception('Unmatched {0}-quoted string'.format(terminator))
+
+    def _match(self, match_fun, accepted_chars='', denied_chars='',
+        replacements=None):
+        replacements = (replacements or {})
+        char = self._next()
+        char = replacements.get(char, char)
+        if match_fun(char) or char in accepted_chars:
+            self.token_buffer.append(char)
+            return 1
+        elif char in denied_chars:                
+            self._backup()
+            return 0
+        else:
+            self._backup()
+            return 0
+
+    def _match_run(self, match_fun, **kwargs):
+        nchars = 0
+        while not self.stream.closed:
+            matched = self._match(match_fun, **kwargs)
+            nchars += matched
+            if matched == 0:
+                return nchars
+        raise Exception('Unexpected end of stream')
+
+    def _match_number(self): 
+        digits = 0      
+        self._match(lambda x: False, '-+')
+        digits += self._match_run(str.isdigit)
+        if self._match(lambda x: False, '.'):
+            digits += self._match_run(str.isdigit)
+        
+        if digits > 0:
+            if self._match(lambda x: False, 'eE'):
+                c2=self._match(lambda x: False, '-+')
+                ndigits = self._match_run(str.isdigit)
+        
+        else:
+            self._empty_buffer()
+            self.token_buffer.append('0')
+        
+        return
 
 
 
