@@ -97,6 +97,7 @@ class Item(object):
         7: 'Branch length',
         8: 'Support value',
         9: 'End',
+        10: 'Triplet',
     }
 
     def __init__(self, typ, val):
@@ -110,7 +111,45 @@ class Item(object):
 class LexerStop(Exception):
     pass
 
+class Streamer(object):
+
+    def __init__(self, stream):
+        """ _peek always looks ahead 1 position """
+        if isinstance(stream, str):
+            stream = StringIO(stream)
+        self.stream = stream
+        self._peek = self.stream.read(1)
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        return self.__next__()
+
+    def __next__(self):
+        char = self._peek
+
+        self._peek = self.stream.read(1)
+
+        if self.stream.closed:
+            raise StopIteration
+        
+        if char == '':
+            self.stream.close()
+            raise StopIteration
+
+        return char
+
+    def peek(self):
+        return self._peek
+
+    def isclosed(self):
+        return self.stream.closed
+
 class Lexer(object):
+
+    """ Breaks newick stream into lexing tokens:
+    Works as a state machine, like Rob Pike's Go text template parser """
 
     # constants representing item types
     EOF     = 0
@@ -123,166 +162,178 @@ class Lexer(object):
     LENGTH  = 7
     SUPPORT = 8
     END     = 9
+    TRIPLET = 10
 
-    def __init__(self, stream):
-        if isinstance(stream, str):
-            stream = StringIO(stream)
-        self.stream = stream
+    DEFAULT_BRANCH_LENGTH = 1.0
+
+    def __init__(self, streamer):
+        
+        self.streamer = streamer
         self.token = None
         self.token_buffer = bytearray()
         self.state = self.lex_tree
-        self.pos = 0
 
-    def _next(self):
-        char = self.stream.read(1)
-        if char == '':
-            raise LexerStop
-        self.pos += 1
-        return char
+    def buffer(self, char):
+        """ Adds a streamed character to the token buffer """
+        self.token_buffer.append(ord(char))
 
-    def _backup(self):
-        self.stream.seek(-1, 1)
-        self.pos -= 1
+    def check_stream(self, msg):
+        if self.streamer.isclosed():
+            raise Exception(msg)
 
-    def _tidyup(self):
-        self.token = None
-        self.token_buffer
-        self.stream.close()
+    def eat_spaces(self):
+        while self.streamer.peek().isspace():
+            next(self.streamer)
 
-    def _peek(self):
-        char = self._next()
-        self._backup()
-        return char
-
-    def _emit(self, item):
+    def emit(self, item):
+        """ Emits the token buffer's contents as a token; clears the buffer """
         self.token = item
-        self._empty_buffer()
+        self.empty_buffer()
 
-    def _empty_buffer(self):
+    def empty_buffer(self):
+        """ Clears the token buffer """
         self.token_buffer = self.token_buffer[0:0]
 
-    def _stop(self):
-        raise LexerStop
+    def __iter__(self):
+        return self
 
     def next(self):
-        try:
-            while not self.token:
-                self.state = self.state()
-            token, self.token = self.token, None
-            return token
-        except LexerStop:
-            self._emit(Item(self.EOF, 1))
-            self._tidyup()
+        """ Hack to enable python 2.x iteration """
+        return self.__next__()
+
+    def __next__(self):
+        # try:
+        while not self.token:
+            self.state = self.state()
+        token, self.token = self.token, None
+        return token
+        # except LexerStop:
+        #     return Item(self.EOF, 1)
+
+    def stop(self):
+        raise StopIteration
 
     def lex_tree(self):
-        while not self.stream.closed:
-            char = self._next()
-            if char == '(':
-                self._emit(Item(self.TREE, char))
-                return self.lex_node
-            if char == '':
+        for x in self.streamer:
+            if x == '(':
                 break
-        self._emit(Item(self.EOF, None))
-        return None
+        
+        if self.streamer.isclosed():
+            print(""" TO DO: Need to send a 'finished' signal """)
+            self.emit(Item(self.EOF, -1))
+            return self.stop
 
-    def lex_before_node(self):
-        """
-        Enter: after seeing LPAREN
-        Expect: LABEL (can be blank) or LPAREN
-        Also accept: RPAREN (empty node)
-        """
-        char = self._next()
+        self.emit(Item(self.LPAREN, '('))
+        return self.lex_subtree_start
+
+    def lex_subtree_start(self):
+        self.eat_spaces()
+        
+        char = self.streamer.peek()
+
         if char == '(':
-            self._emit(Item(self.LPAREN, char))
-            return self.lex_node
-
-        elif char == ')':
-            self._emit(Item(self.RPAREN, char))
-            return self.lex_label
-
-        elif char.isspace(): # ignore
-            return self.lex_node
-
-        # elif char == ',':  # bug - ignores missing labels eg (,,(,));
-        #     return self.lex_node
-
-        elif char == ';':
-            self._emit(Item(self.END, char))
-            return self.lex_tree
+            self.emit(Item(self.LPAREN, next(self.streamer)))
+            return self.lex_subtree_start
 
         else:
-            self._backup()
+            # return self.lex_trios # placeholder
             return self.lex_label
-
-    def lex_after_node(self):
-        pass
-
 
     def lex_label(self):
-        """
-        Enter: after seeing LPAREN, RPAREN or COMMA
-        Expect: LENGTH
-        """
-        char = self._next()
+
+        char = self.streamer.peek()
         if char in ('"', "'"):
+            next(self.streamer) # throw away opening quote 
             self._match_quoted_label(char)
         else:
-            self._backup()
             de_spacer = {' ': ''}
             self._match_run(str.isalnum, accepted_chars='-_|', 
                 denied_chars=':,;', replacements=de_spacer)
-        self._emit(Item(self.LABEL, str(self.token_buffer)))
-        if self._peek() == ',':
-            self._next()
+        self.emit(Item(self.LABEL, self.token_buffer.decode()))
 
+        # return self.lex_trios
         return self.lex_length
 
-
     def lex_length(self):
-        char = self._next()
+        char = self.streamer.peek()
         if char == ':':
+            self.streamer.next() # throw away colon
             self._match_number()
             if len(self.token_buffer) == 0:
-                num = 0.0
+                num = self.DEFAULT_BRANCH_LENGTH
             else: 
                 num = float(self.token_buffer)
         else:
-            self._backup()
-            num = 0.0
-        self._emit(Item(self.LENGTH, num))
-        return self.lex_node
+            num = self.DEFAULT_BRANCH_LENGTH
+        self.emit(Item(self.LENGTH, num))
+        return self.lex_after_subtree
+
+    def lex_after_subtree(self):
+        self.eat_spaces()
+
+        char = self.streamer.peek()
+
+        if char == ';':
+            next(self.streamer)
+            self.emit(Item(self.END, ';'))
+            return self.lex_tree
+
+        elif char == ',':
+            next(self.streamer)
+            return self.lex_subtree_start
+
+        elif char == ')':
+            next(self.streamer)
+            self.emit(Item(self.RPAREN, ')'))
+            return self.lex_label
+
+        else:
+            raise Exception('Don\'t know how to parse this: {0} ({1})'.format(
+                char, self.streamer.stream.tell()))
 
     def _match_quoted_label(self, terminator):
-        while not self.stream.closed:
-            char = self._next()
+        for char in self.streamer:
             if char == terminator:
-                return 
-            self.token_buffer.append(char)
-        raise Exception('Unmatched {0}-quoted string'.format(terminator))
+                return
+            self.buffer(char)
 
-    def _match(self, match_fun, accepted_chars='', denied_chars='',
+        raise Exception('Unterminated {0}-quoted string'.format(terminator))
+
+    def _match(self, predicate, accepted_chars='', denied_chars='',
         replacements=None):
+        """
+        Checks next character in stream. If predicate returns True, or char
+        is in `accepted_chars`, advances the stream and returns 1. Else, or if
+        the char is in `denied_chars`, doesn't advance the stream and returns 0.
+        Replacements is an optional dictionary that can be used to replace the
+        streamed character with an alternative (e.g. replace spaces with 
+        underscores).
+        """
+
         replacements = (replacements or {})
-        char = self._next()
+        char = self.streamer.peek()
         char = replacements.get(char, char)
-        if match_fun(char) or char in accepted_chars:
-            self.token_buffer.append(char)
+        if predicate(char) or char in accepted_chars:
+            self.buffer(next(self.streamer)) # advance stream
             return 1
         elif char in denied_chars:                
-            self._backup()
             return 0
         else:
-            self._backup()
             return 0
 
-    def _match_run(self, match_fun, **kwargs):
+    def _match_run(self, predicate, **kwargs):
+        """
+        kwargs are `accepted_chars`, `denied_chars` and `replacements`
+        """
         nchars = 0
-        while not self.stream.closed:
-            matched = self._match(match_fun, **kwargs)
-            nchars += matched
-            if matched == 0:
-                return nchars
-        raise Exception('Unexpected end of stream')
+        try:
+            while True:
+                matched = self._match(predicate, **kwargs)
+                nchars += matched
+                if matched == 0:
+                    return nchars
+        except StopIteration:
+            raise Exception('Unexpected end of stream')
 
     def _match_number(self): 
         digits = 0      
@@ -293,20 +344,13 @@ class Lexer(object):
         
         if digits > 0:
             if self._match(lambda x: False, 'eE'):
-                c2=self._match(lambda x: False, '-+')
-                ndigits = self._match_run(str.isdigit)
+                self._match(lambda x: False, '-+')
+                self._match_run(str.isdigit)
         
         else:
             self._empty_buffer()
-            self.token_buffer.append('0')
         
         return
-
-
-
-
-
-
 
 
 
@@ -332,13 +376,3 @@ class NewickTaxonomy(Taxonomy):
     def parse(self):
         while self.charstream:
             print(next(self.charstream))
-
-
-
-
-
-
-
-def parse(s):
-    pass
-
