@@ -97,7 +97,6 @@ class Item(object):
         7: 'Branch length',
         8: 'Support value',
         9: 'End',
-        10: 'Triplet',
     }
 
     def __init__(self, typ, val):
@@ -162,7 +161,6 @@ class Lexer(object):
     LENGTH  = 7
     SUPPORT = 8
     END     = 9
-    TRIPLET = 10
 
     DEFAULT_BRANCH_LENGTH = 1.0
 
@@ -202,13 +200,10 @@ class Lexer(object):
         return self.__next__()
 
     def __next__(self):
-        # try:
         while not self.token:
             self.state = self.state()
         token, self.token = self.token, None
         return token
-        # except LexerStop:
-        #     return Item(self.EOF, 1)
 
     def stop(self):
         raise StopIteration
@@ -219,7 +214,6 @@ class Lexer(object):
                 break
         
         if self.streamer.isclosed():
-            print(""" TO DO: Need to send a 'finished' signal """)
             self.emit(Item(self.EOF, -1))
             return self.stop
 
@@ -228,7 +222,6 @@ class Lexer(object):
 
     def lex_subtree_start(self):
         self.eat_spaces()
-        
         char = self.streamer.peek()
 
         if char == '(':
@@ -236,11 +229,9 @@ class Lexer(object):
             return self.lex_subtree_start
 
         else:
-            # return self.lex_trios # placeholder
             return self.lex_label
 
     def lex_label(self):
-
         char = self.streamer.peek()
         if char in ('"', "'"):
             next(self.streamer) # throw away opening quote 
@@ -251,7 +242,6 @@ class Lexer(object):
                 denied_chars=':,;', replacements=de_spacer)
         self.emit(Item(self.LABEL, self.token_buffer.decode()))
 
-        # return self.lex_trios
         return self.lex_length
 
     def lex_length(self):
@@ -270,7 +260,6 @@ class Lexer(object):
 
     def lex_after_subtree(self):
         self.eat_spaces()
-
         char = self.streamer.peek()
 
         if char == ';':
@@ -349,9 +338,6 @@ class Lexer(object):
         
         else:
             self._empty_buffer()
-        
-        return
-
 
 
 class NewickTaxonomy(Taxonomy):
