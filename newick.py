@@ -60,6 +60,9 @@ class Item(object):
 
 class Streamer(object):
 
+    """ Wraps an io.StringIO and iterates a byte at a time,
+    instead of a line at a time """
+
     def __init__(self, stream):
         """ _peek always looks ahead 1 position """
         if isinstance(stream, str):
@@ -71,6 +74,7 @@ class Streamer(object):
         return self
 
     def next(self):
+        """ Python 2.x / 3.x compatibility hack """
         return self.__next__()
 
     def __next__(self):
@@ -129,7 +133,7 @@ class Lexer(object):
         return self
 
     def next(self):
-        """ Hack to enable python 2.x iteration """
+        """ Python 2.x / 3.x compatibility hack """
         return self.__next__()
 
     def __next__(self):
@@ -326,6 +330,10 @@ class Parser(object):
         l = Lexer(s)
         parser = cls(l)
         parser.parse()
+        if not s.isclosed(): # expect it to be closed on reaching EOF
+            s.stream.close() # but make explicit check here anyway
+        if len(parser.trees) == 1:
+            return parser.trees[0]
         return parser.trees
 
     @classmethod
@@ -334,6 +342,10 @@ class Parser(object):
         l = Lexer(s)
         parser = cls(l)
         parser.parse()
+        if not s.isclosed(): # expect it to be closed on reaching EOF
+            s.stream.close() # but make explicit check here anyway
+        if len(parser.trees) == 1:
+            return parser.trees[0]        
         return parser.trees
 
     def _get_data(self):
@@ -557,6 +569,7 @@ class Queue(object):
         return len(self.queue)
 
     def next():
+        """ Python 2.x / 3.x compatibility hack """
         return self.__next__()
 
     def __next__(self):
