@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import os, sys
-import collections
+import bisect, collections
 if sys.version_info < (3,):
     from cStringIO import StringIO
 else:
@@ -10,26 +10,43 @@ else:
 # constants representing item types
 EOF     = 0
 TREE    = 1
-SUBTREE = 2
-LEAF    = 3
+LEAF    = 2
+SUBTREE = 3
 LABEL   = 4
-ENDSUB  = 5
-LENGTH  = 6
-ENDTREE = 7
+LENGTH  = 5
+SUPPORT = 6
+ENDSUB  = 7
+ENDTREE = 8
 
 DEFAULT_BRANCH_LENGTH = 1.0
+
+
+class ParseError(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+    def __str__(self):
+        return self.msg
+
+
+class LexError(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+    def __str__(self):
+        return self.msg
+
 
 class Item(object):
 
     itemtypes = {
         0: 'End of file',
         1: 'Tree',
-        2: 'Subtree', 
-        3: 'Leaf',
+        2: 'Leaf', 
+        3: 'Subtree',
         4: 'Label',
-        5: 'Subtree end',
-        6: 'Branch length',
-        7: 'End tree',
+        5: 'Branch length',
+        6: 'Support value',
+        7: 'End subtree',
+        8: 'End tree',
     }
 
     def __init__(self, typ, val):
@@ -39,6 +56,7 @@ class Item(object):
     def __repr__(self):
         typ = self.itemtypes[self.typ]  
         return '{0}: "{1}"'.format(typ, self.val)
+
 
 class Streamer(object):
 
@@ -74,6 +92,7 @@ class Streamer(object):
 
     def isclosed(self):
         return self.stream.closed
+
 
 class Lexer(object):
 
@@ -121,12 +140,24 @@ class Lexer(object):
         token, self.token = self.token, None
         return token
 
+    def pos(self):
+        """ Returns position in input stream
+        """
+        return self.streamer.stream.tell()
+
     def stop(self):
         raise StopIteration
 
+    def truncated_string(self, s, length=60, ellipsis='...'):
+        """ Returns a string `s` truncated to maximum length `length`.
+        If `s` is longer than `length` it is truncated and `ellipsis` is
+        appended to the end. The ellipsis is included in the length.
+        If `s` is shorter than `length` `s` is returned unchanged.
+        """
+        l = length - len(ellipsis)
+        return s[:l] + (s[l:] and ellipsis)
+
     def lex_tree(self):
-        # while self.streamer.peek() != '(':
-        #     next(self.streamer)
         for x in self.streamer:
             if x == '(':
                 break
@@ -193,19 +224,37 @@ class Lexer(object):
         elif char == ')':
             next(self.streamer)
             self.emit(Item(ENDSUB, ')'))
+            peek = self.streamer.peek() # is a label or a support value next?
+            if peek.isdigit() or peek == '.':
+                return self.lex_support
             return self.lex_label
 
         else:
             raise LexError('Don\'t know how to lex this: {0} ({1})'.format(
                 char, self.streamer.stream.tell()))
 
+    def lex_support(self):
+        self._match_number()
+        if len(self.token_buffer) == 0:
+            num = 0.0
+        else:
+            num = float(self.token_buffer)
+        self.emit(Item(SUPPORT, num))
+        return self.lex_length
+
     def _match_delimited(self, delimiter):
+        pos = self.pos() - 2 # stream is 2 chars ahead of the opening delimiter
         for char in self.streamer:
             if char == delimiter:
                 return
             self.buffer(char)
 
-        raise LexError('Unterminated {0}-delimited string'.format(delimiter))
+        buf = self.truncated_string(self.token_buffer.decode())
+        msg = ''.join((
+            'Unterminated {0}-delimited string starting at '.format(delimiter),
+            'position {0}:\n{1}{2}'.format(pos, delimiter, buf)
+            ))
+        raise LexError(msg)
 
     def _match(self, predicate, accepted_chars='', denied_chars='',
         replacements=None):
@@ -261,23 +310,6 @@ class Lexer(object):
         else:
             self.empty_buffer()
 
-class Tree(object):
-    """ Container type for nodes in a tree """
-
-    def __init__(self, node):
-        self.seed = node
-
-class ParseError(Exception):
-    def __init__(self, msg):
-        self.msg = msg
-    def __str__(self):
-        return self.msg
-
-class LexError(Exception):
-    def __init__(self, msg):
-        self.msg = msg
-    def __str__(self):
-        return self.msg
 
 class Parser(object):
 
@@ -310,12 +342,15 @@ class Parser(object):
         be the next tokens in the stream. Throws ParseError if they are not.
         """
         label = next(self.lexer)
-        if label.typ != LABEL:
-            raise ParseError('Expected a label')
+        if label.typ not in (LABEL, SUPPORT):
+            raise ParseError(
+                'Expected a label or a support value, found {0}'.format(
+                    label))
         
         length = next(self.lexer)
         if length.typ != LENGTH:
-            raise ParseError('Expected a length')
+            raise ParseError('Expected a length, found {0}'.format(
+                length))
 
         return (label.val, length.val)
 
@@ -340,7 +375,10 @@ class Parser(object):
 
     def close_subtree(self, label, length):
         subtree = self.stack.pop()
-        subtree.data.label = label
+        if isinstance(label, float):
+            subtree.data.add_attribute('support', label)
+        else:
+            subtree.data.label = label
         subtree.next.set_length(length)
 
     def parse(self):
@@ -359,21 +397,72 @@ class Parser(object):
             elif token.typ == LEAF:
                 label, length = self._get_data()
                 self.add_leaf(label, length)
+                if label:
+                    self.trees[-1].add_taxon(label)
 
             elif token.typ == ENDSUB:
                 label, length = self._get_data()
                 self.close_subtree(label, length)
 
             # labels and lengths should always be dealt with by LEAF and ENDSUB
-            # cases, and should be seen here - ParseError is raised
+            # cases, and should not be seen here - ParseError is raised
             elif token.typ == LABEL: 
                 raise ParseError('Unexpected label token')
 
             elif token.typ == LENGTH:
                 raise ParseError('Unexpected length token')
 
-            elif token.typ == ENDTREE:
-                pass
+            elif token.typ == SUPPORT:
+                raise ParseError('Unexpected support token')
+
+            elif token.typ == ENDTREE: # trigger for tree-finalising functions
+                self.trees[-1].map_taxa_to_binary()
+
+
+class Tree(object):
+    """ Container type for nodes in a tree """
+
+    def __init__(self, node):
+        self.seed = node
+        self.taxa = []
+        self.taxonmap = {}
+
+    def add_taxon(self, taxon):
+        bisect.insort(self.taxa, taxon)
+
+    def calc_splits(self, relist=False):
+        if relist:
+            self.relist_taxa()
+        for n in self.postorder():
+            if n.isleaf():
+                taxon = n.data.label
+                split = self.taxonmap[taxon]
+                n.data.attributes['split'] = split
+            if n.out is None:
+                return
+            n.out.data.attributes['split'] |= n.data.attributes['split']
+         
+    def relist_taxa(self):
+        self.taxa[:] = [] # clears list
+        for n in self.preorder():
+            lab = n.data.label
+            if n.isleaf() and lab:
+                self.add_taxon(lab)
+        self.map_taxa_to_binary()
+
+    def map_taxa_to_binary(self):
+        d = dict((taxon, 1 << self.taxa.index(taxon)) for taxon in self.taxa)
+        self.taxonmap = d
+
+    def preorder(self):
+        return self.seed.preorder_generator()
+
+    def postorder(self):
+        return self.seed.postorder_generator()
+
+    def levelorder(self):
+        return self.seed.levelorder_generator()
+
 
 class Node(object):
 
@@ -445,14 +534,16 @@ class Node(object):
             yield n
             n = n.next
 
+
 class Data(object):
 
     def __init__(self, label):
         self.label = label
-        self.attributes = {}
+        self.attributes = {'split': 0}
 
     def add_attribute(self, key, value):
         self.attributes[key] = value
+
 
 class Queue(object):
 
@@ -483,94 +574,3 @@ class Queue(object):
 
     def isempty(self):
         return len(self.queue) == 0
-
-
-
-
-
-
-
-
-
-class TaxNode(object):
-    def __init__(self, name):
-        self.name = name
-        self.up = None
-        self.down = list()
-
-    def addChild(self, c):
-        if not c in self.down:
-            self.down.append(c)
-
-    def addParent(self, p):
-        if self.up is not None and self.up != p:
-            raise TaxonomyInconsistencyError(
-                "Level {} has several parents, at least two: {}, {}"
-                .format(self.name, self.up.name, p.name))
-        self.up = p
-
-    def iterLeaves(self):
-        if len(self.down) == 0:
-            yield self
-        else:
-            for child in self.down:
-                for elem in child.iterLeaves():
-                    yield elem
-
-class Taxonomy(object):
-    def __init__(self):
-        raise NotImplementedError("abstract class")
-
-    def iterParents(self, node, stopBefor=None):
-        if node == stopBefor:
-            return
-        tn = self.hierarchy[node]
-        while tn.up is not None and tn.up.name != stopBefor:
-            tn = tn.up
-            yield tn.name
-
-    def _countParentAmongLevelSet(self, levels):
-        levelSet = set(levels)
-        cnts = dict()
-        for lev in levelSet:
-            t = set(self.iterParents(lev)).intersection(levelSet)
-            cnts[lev] = len(t)
-        return cnts
-
-    def mostSpecific(self, levels):
-        # count who often each element is a child of any other one.
-        # the one with len(levels)-1 is the most specific level
-        cnts = self._countParentAmongLevelSet(levels)
-        for lev, cnt in cnts.items():
-            if cnt==len(levels)-1:
-                return lev
-        raise Exception("None of the element is subelement of all others")
-
-    def mostGeneralLevel(self, levels):
-        # count who often each element is a child of any other one.
-        # the one with len(levels)-1 is the most specific level
-        cnts = self._countParentAmongLevelSet(levels)
-        for lev, cnt in cnts.items():
-            if cnt==0:
-                return lev
-        raise Exception("None of the element is the root of all others")
-
-    def printSubTreeR(self, fd, lev=None, indent=0):
-        if lev is None:
-            lev = self.root
-        fd.write("{}{}\n".format(" "*2*indent, lev))
-        for child in self.hierarchy[lev].down:
-            self.printSubTreeR(fd, child.name, indent+1)
-
-    def __str__(self):
-        fd = io.StringIO()
-        self.printSubTreeR(fd)
-        res = fd.getvalue()
-        fd.close()
-        return res
-
-
-class NewickTaxonomy(Taxonomy):
-    pass
-
-
