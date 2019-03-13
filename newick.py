@@ -58,7 +58,7 @@ class Streamer(object):
 
         if self.stream.closed:
             raise StopIteration
-        
+
         if char == '':
             self.stream.close()
             raise StopIteration
@@ -77,11 +77,11 @@ class Lexer(object):
     """ Breaks newick stream into lexing tokens:
     Works as a state machine, like Rob Pike's Go text template parser """
 
-    tokens = enum('EOF', 'TREE', 'LEAF', 'SUBTREE', 'LABEL', 'LENGTH', 
+    tokens = enum('EOF', 'TREE', 'LEAF', 'SUBTREE', 'LABEL', 'LENGTH',
         'SUPPORT', 'ENDSUB', 'ENDTREE')
 
     def __init__(self, streamer):
-        
+
         self.streamer = streamer
         self.token = None
         self.token_buffer = bytearray()
@@ -141,7 +141,7 @@ class Lexer(object):
         for x in self.streamer:
             if x == '(':
                 break
-        
+
         if self.streamer.isclosed():
             self.emit(Item(self.tokens.EOF, -1))
             return self.stop
@@ -165,11 +165,11 @@ class Lexer(object):
         self.eat_spaces()
         char = self.streamer.peek()
         if char in ('"', "'"):
-            next(self.streamer) # throw away opening quote 
+            next(self.streamer) # throw away opening quote
             self._match_delimited(char)
         else:
             despacer = {' ': '_'}
-            self._match_run(str.isalnum, accepted_chars='-_|.', 
+            self._match_run(str.isalnum, accepted_chars='-_|.',
                 denied_chars=':,;', replacements=despacer)
         self.emit(Item(self.tokens.LABEL, self.token_buffer.decode()))
 
@@ -182,7 +182,7 @@ class Lexer(object):
             self._match_number()
             if len(self.token_buffer) == 0:
                 num = None
-            else: 
+            else:
                 num = float(self.token_buffer)
         else:
             num = None
@@ -244,7 +244,7 @@ class Lexer(object):
         is in `accepted_chars`, advances the stream and returns 1. Else, or if
         the char is in `denied_chars`, doesn't advance the stream and returns 0.
         Replacements is an optional dictionary that can be used to replace the
-        streamed character with an alternative (e.g. replace spaces with 
+        streamed character with an alternative (e.g. replace spaces with
         underscores).
         """
 
@@ -254,10 +254,10 @@ class Lexer(object):
 
         if predicate(char) or char in accepted_chars:
             if len(char) == 1:
-                self.buffer(char) 
+                self.buffer(char)
             next(self.streamer) # advance stream
             return 1
-        elif char in denied_chars:                
+        elif char in denied_chars:
             return 0
         else:
             return 0
@@ -276,18 +276,18 @@ class Lexer(object):
         except StopIteration:
             raise LexError('Unexpected end of stream')
 
-    def _match_number(self): 
-        digits = 0      
+    def _match_number(self):
+        digits = 0
         self._match(lambda x: False, '-+')
         digits += self._match_run(str.isdigit)
         if self._match(lambda x: False, '.'):
             digits += self._match_run(str.isdigit)
-        
+
         if digits > 0:
             if self._match(lambda x: False, 'eE'):
                 self._match(lambda x: False, '-+')
                 self._match_run(str.isdigit)
-        
+
         else:
             self.empty_buffer()
 
@@ -298,7 +298,7 @@ class Parser(object):
         self.lexer = lexer
         self.tokens = lexer.tokens
         self.trees = list()
-        self.stack = list() # top value is the node to add new siblings of 
+        self.stack = list() # top value is the node to add new siblings of
             # the current subtree. Below is the same for previous subtrees
 
     @classmethod
@@ -326,12 +326,12 @@ class Parser(object):
         try:
             parser.parse(**kwargs)
         except ParseError as err:
-            print('Not parsed due to ParseError')            
+            print('Not parsed due to ParseError')
             print(err)
         if not s.isclosed(): # expect it to be closed on reaching EOF
             s.stream.close() # but make explicit check here anyway
         if len(parser.trees) == 1:
-            return parser.trees[0]        
+            return parser.trees[0]
         return parser.trees
 
     def _get_data(self):
@@ -344,7 +344,7 @@ class Parser(object):
             raise ParseError(
                 'Expected a label or a support value, found {0}'.format(
                     label))
-        
+
         length = next(self.lexer)
         if length.typ != self.tokens.LENGTH:
             raise ParseError('Expected a length, found {0}'.format(
@@ -384,7 +384,7 @@ class Parser(object):
         for token in self.lexer:
             if token.typ == self.tokens.EOF:
                 return
-            
+
             elif token.typ == self.tokens.TREE:
                 seed = Node(Data(None))
                 self.trees.append(Tree(seed))
@@ -411,7 +411,7 @@ class Parser(object):
 
             # labels and lengths should always be dealt with by LEAF and ENDSUB
             # cases, and should not be seen here - ParseError is raised
-            elif token.typ == self.tokens.LABEL: 
+            elif token.typ == self.tokens.LABEL:
                 raise ParseError('Unexpected label token')
 
             elif token.typ == self.tokens.LENGTH:
@@ -453,12 +453,12 @@ class Tree(object):
             if n.isleaf():
                 taxon = n.data.label
                 split = self.taxonmap[taxon]
-                n.data.attributes['split'] = split   
-            
+                n.data.attributes['split'] = split
+
             n.out.data.attributes['split'] = self.minsplit(
                 n.data.attributes['split'] ^ n.out.data.attributes.get(
                     'split', 0))
-         
+
     def relist_taxa(self):
         self.taxa[:] = list() # clears list
         for n in self.preorder():
@@ -503,7 +503,7 @@ class Node(object):
         if self.isleaf():
             return label + (':'+str(length) if length else '')
         subtree = ','.join(str(ch) for ch in self.children_generator())
-        return '({0}){1}{2}'.format(subtree, label, 
+        return '({0}){1}{2}'.format(subtree, label,
             (':'+str(length) if length else ''))
 
     def __repr__(self):
